@@ -1,0 +1,48 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Local databases and uploads
+backend/resumes.db
+backend/uploads/
+chroma_db/
+*.db
+
+# Build outputs
+dist/
+frontend/dist/
+build/
+
+# Environment files (keep API keys secure!)
+.env
+backend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
