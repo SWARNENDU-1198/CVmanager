@@ -1,13 +1,14 @@
 import os
 import uuid
 from typing import List, Dict, Any, Optional
-from langchain_community.vectorstores import SupabaseVectorStore
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import SupabaseVectorStore, Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from backend.config import settings
 from backend.ai.llm_factory import get_llm, invoke_llm_with_retry
 from backend import database
+
+CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "chroma_db"))
 
 class CustomSupabaseVectorStore(SupabaseVectorStore):
     def match_args(
@@ -21,18 +22,42 @@ class CustomSupabaseVectorStore(SupabaseVectorStore):
             ret["filter"] = filter
         return ret
 
-# Initialize local HuggingFace embeddings (cached in HF cache, run locally)
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+_embeddings_instance = None
 
-# Initialize Supabase Vector Store
-def get_vector_store():
-    client = database.get_supabase_client()
-    return CustomSupabaseVectorStore(
-        client=client,
-        embedding=embeddings,
-        table_name="documents",
-        query_name="match_documents"
+def get_embeddings():
+    global _embeddings_instance
+    if _embeddings_instance is None:
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings
+        except ImportError:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+        _embeddings_instance = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    return _embeddings_instance
+
+def get_chroma_vector_store():
+    os.makedirs(CHROMA_DIR, exist_ok=True)
+    return Chroma(
+        collection_name="resumes",
+        embedding_function=get_embeddings(),
+        persist_directory=CHROMA_DIR
     )
+
+def get_vector_store():
+    if settings.SUPABASE_URL and settings.SUPABASE_KEY:
+        try:
+            client = database.get_supabase_client()
+            # Test simple call to verify client network connection
+            client.table("resumes").select("id").limit(1).execute()
+            return CustomSupabaseVectorStore(
+                client=client,
+                embedding=get_embeddings(),
+                table_name="documents",
+                query_name="match_documents"
+            )
+        except Exception as e:
+            print(f"Supabase vector store connection failed ({e}). Falling back to local ChromaDB.")
+            return get_chroma_vector_store()
+    return get_chroma_vector_store()
 
 def index_resume(resume_id: str, filename: str, sections: dict):
     # We will chunk each section separately to preserve section metadata
@@ -65,15 +90,30 @@ def index_resume(resume_id: str, filename: str, sections: dict):
             documents.append(doc)
             
     if documents:
-        db = get_vector_store()
-        db.add_documents(documents)
+        try:
+            db = get_vector_store()
+            db.add_documents(documents)
+        except Exception as err:
+            print(f"Primary vector store add failed ({err}). Retrying with local ChromaDB store...")
+            try:
+                chroma_db = get_chroma_vector_store()
+                chroma_db.add_documents(documents)
+                print(f"Successfully indexed {filename} in local ChromaDB.")
+            except Exception as chroma_err:
+                print(f"Local ChromaDB indexing failed for {filename}: {chroma_err}")
 
 def delete_resume_vectors(resume_id: str):
+    if settings.SUPABASE_URL and settings.SUPABASE_KEY:
+        try:
+            client = database.get_supabase_client()
+            client.table("documents").delete().eq("metadata->>resume_id", resume_id).execute()
+        except Exception as e:
+            print(f"Error deleting Supabase vectors for resume {resume_id}: {e}")
     try:
-        client = database.get_supabase_client()
-        client.table("documents").delete().eq("metadata->>resume_id", resume_id).execute()
+        chroma_db = get_chroma_vector_store()
+        chroma_db.delete(where={"resume_id": resume_id})
     except Exception as e:
-        print(f"Error deleting vectors for resume {resume_id}: {e}")
+        print(f"Error deleting Chroma vectors for resume {resume_id}: {e}")
 
 def generate_summaries(resume_text: str) -> dict:
     """Generate short, detailed, and executive summaries using Gemini."""
@@ -127,10 +167,8 @@ def ask_resume_question(question: str, resume_id: str = None) -> dict:
     Query the vector database and generate an answer grounded strictly in the resume context.
     If resume_id is specified, search is restricted to that resume.
     """
-    db = get_vector_store()
-    
     # Define search filter
-    search_filter = {}
+    search_filter = None
     if resume_id:
         search_filter = {"resume_id": resume_id}
         
@@ -138,8 +176,17 @@ def ask_resume_question(question: str, resume_id: str = None) -> dict:
     # If single resume, retrieve up to 5 chunks. If multi, retrieve up to 8 chunks.
     k_val = 5 if resume_id else 8
     
-    # We use similarity search with score or standard similarity search
-    retrieved_docs = db.similarity_search(question, k=k_val, filter=search_filter)
+    try:
+        db = get_vector_store()
+        retrieved_docs = db.similarity_search(question, k=k_val, filter=search_filter or {})
+    except Exception as err:
+        print(f"Primary vector store search failed ({err}). Falling back to ChromaDB...")
+        try:
+            chroma_db = get_chroma_vector_store()
+            retrieved_docs = chroma_db.similarity_search(question, k=k_val, filter=search_filter)
+        except Exception as chroma_err:
+            print(f"ChromaDB search also failed ({chroma_err}).")
+            retrieved_docs = []
     
     context_list = []
     sources = []
@@ -256,14 +303,15 @@ def compare_resumes(resume_id_a: str, resume_id_b: str) -> dict:
 def evaluate_candidate_for_job(resume: dict, needs: str, eligibilities: str) -> dict:
     llm = get_llm(temperature=0.1)
     
-    resume_content = resume.get("parsed_text") or resume.get("summary_detailed") or ""
+    # Use detailed/short summary first if available, otherwise truncate parsed text to 1500 chars for fast processing
+    resume_content = resume.get("summary_detailed") or resume.get("summary_short") or (resume.get("parsed_text", "")[:1500])
     if not resume_content:
         full_resume = database.get_resume(resume["id"])
         if full_resume:
-            resume_content = full_resume.get("parsed_text") or ""
+            resume_content = full_resume.get("summary_detailed") or full_resume.get("summary_short") or (full_resume.get("parsed_text", "")[:1500])
             
     prompt = f"""
-    You are an expert HR recruitment specialist. Evaluate the candidate's resume content against the company's job needs and eligibility criteria.
+    You are an expert HR recruitment specialist. Evaluate the candidate's profile against the company's job needs and eligibility criteria.
     
     Job Needs:
     {needs}
@@ -272,7 +320,7 @@ def evaluate_candidate_for_job(resume: dict, needs: str, eligibilities: str) -> 
     {eligibilities}
     
     Candidate Name: {resume.get('sections', {}).get('name') or resume.get('filename')}
-    Resume Content:
+    Resume Content Summary:
     {resume_content}
     
     Your task is to determine if the candidate should be shortlisted, calculate a matching score, and check each eligibility criteria.
@@ -328,18 +376,23 @@ def filter_resumes(needs: str, eligibilities: str) -> list:
     if not resumes:
         return []
         
-    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     evaluations = []
     
-    for i, resume in enumerate(resumes):
-        if i > 0:
-            # Add 1.0 second delay between requests on free tier to avoid 429 rate limits
-            time.sleep(1.0)
-        try:
-            eval_res = evaluate_candidate_for_job(resume, needs, eligibilities)
-            evaluations.append(eval_res)
-        except Exception as exc:
-            print(f"Candidate evaluation generated an exception for {resume.get('filename')}: {exc}")
-            
+    # Process candidates concurrently using ThreadPoolExecutor for 5x-10x speedup
+    max_workers = min(5, max(1, len(resumes)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_resume = {
+            executor.submit(evaluate_candidate_for_job, resume, needs, eligibilities): resume
+            for resume in resumes
+        }
+        for future in as_completed(future_to_resume):
+            resume = future_to_resume[future]
+            try:
+                eval_res = future.result()
+                evaluations.append(eval_res)
+            except Exception as exc:
+                print(f"Candidate evaluation generated an exception for {resume.get('filename')}: {exc}")
+                
     evaluations.sort(key=lambda x: x.get("match_percentage", 0), reverse=True)
     return evaluations

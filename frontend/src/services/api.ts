@@ -85,9 +85,20 @@ export interface AppSettings {
   groq_model: string;
 }
 
+const safeFetch = async (url: string, options?: RequestInit): Promise<Response> => {
+  try {
+    return await fetch(url, options);
+  } catch (err: any) {
+    if (err instanceof TypeError || (err?.message && err.message.toLowerCase().includes('fetch'))) {
+      throw new Error(`Unable to connect to backend server at ${API_BASE_URL}. Please ensure the Python backend server is running.`);
+    }
+    throw err;
+  }
+};
+
 export const api = {
   getSettings: async () => {
-    const res = await fetch(`${API_BASE_URL}/api/settings`);
+    const res = await safeFetch(`${API_BASE_URL}/api/settings`);
     if (!res.ok) throw new Error("Failed to fetch settings");
     return res.json() as Promise<AppSettings>;
   },
@@ -99,7 +110,7 @@ export const api = {
     groq_api_key?: string;
     groq_model?: string;
   }) => {
-    const res = await fetch(`${API_BASE_URL}/api/settings`, {
+    const res = await safeFetch(`${API_BASE_URL}/api/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params)
@@ -116,7 +127,7 @@ export const api = {
     const formData = new FormData();
     files.forEach(file => formData.append("files", file));
 
-    const res = await fetch(`${API_BASE_URL}/api/resumes/upload`, {
+    const res = await safeFetch(`${API_BASE_URL}/api/resumes/upload`, {
       method: "POST",
       body: formData
     });
@@ -128,19 +139,19 @@ export const api = {
   },
 
   listResumes: async () => {
-    const res = await fetch(`${API_BASE_URL}/api/resumes`);
+    const res = await safeFetch(`${API_BASE_URL}/api/resumes`);
     if (!res.ok) throw new Error("Failed to list resumes");
     return res.json() as Promise<ResumeMetadata[]>;
   },
 
   getResumeDetails: async (id: string) => {
-    const res = await fetch(`${API_BASE_URL}/api/resumes/${id}`);
+    const res = await safeFetch(`${API_BASE_URL}/api/resumes/${id}`);
     if (!res.ok) throw new Error("Failed to get resume details");
     return res.json() as Promise<ResumeMetadata>;
   },
 
   deleteResume: async (id: string) => {
-    const res = await fetch(`${API_BASE_URL}/api/resumes/${id}`, {
+    const res = await safeFetch(`${API_BASE_URL}/api/resumes/${id}`, {
       method: "DELETE"
     });
     if (!res.ok) throw new Error("Failed to delete resume");
@@ -148,7 +159,7 @@ export const api = {
   },
 
   queryResumes: async (question: string, resumeId?: string) => {
-    const res = await fetch(`${API_BASE_URL}/api/query`, {
+    const res = await safeFetch(`${API_BASE_URL}/api/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, resume_id: resumeId || null })
@@ -161,7 +172,7 @@ export const api = {
   },
 
   compareResumes: async (idA: string, idB: string) => {
-    const res = await fetch(`${API_BASE_URL}/api/compare`, {
+    const res = await safeFetch(`${API_BASE_URL}/api/compare`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ resume_id_a: idA, resume_id_b: idB })
@@ -174,7 +185,7 @@ export const api = {
   },
 
   filterResumes: async (needs: string, eligibilities: string) => {
-    const res = await fetch(`${API_BASE_URL}/api/resumes/filter`, {
+    const res = await safeFetch(`${API_BASE_URL}/api/resumes/filter`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ needs, eligibilities })

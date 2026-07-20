@@ -27,6 +27,7 @@ app = FastAPI(title="Resume AI Assistant API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -129,73 +130,47 @@ def update_settings(req: SettingsUpdateRequest):
 async def upload_resumes(files: List[UploadFile] = File(...)):
     uploaded_resumes = []
     failed_resumes = []
-    client = database.get_supabase_client()
     
     for file in files:
-        # Validate extension
         ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in [".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg"]:
+        if ext not in [".pdf", ".docx", ".txt", ".csv", ".png", ".jpg", ".jpeg"]:
             failed_resumes.append({"filename": file.filename, "error": "Unsupported file format."})
-            continue  # Skip unsupported files
+            continue
             
         resume_id = str(uuid.uuid4())
         safe_filename = f"{resume_id}{ext}"
-        # Save to a temporary file locally so we can extract text
-        temp_filepath = os.path.join(settings.UPLOADS_DIR, safe_filename)
+        saved_filepath = os.path.join(settings.UPLOADS_DIR, safe_filename)
         
-        with open(temp_filepath, "wb") as f:
+        with open(saved_filepath, "wb") as f:
             shutil.copyfileobj(file.file, f)
             
         uploaded_to_storage = False
         added_to_db = False
+        public_url = f"/static/uploads/{safe_filename}"
         
         try:
             # 1. Extract raw text
-            raw_text = extractor.extract_text(temp_filepath)
+            raw_text = extractor.extract_text(saved_filepath)
             
             # 2. Segment into sections
             sections = detector.detect_sections(raw_text)
             
-            # 3. Upload to Supabase Storage
-            try:
-                with open(temp_filepath, "rb") as file_data:
-                    client.storage.from_("resumes").upload(
-                        path=safe_filename,
-                        file=file_data,
-                        file_options={"content-type": file.content_type}
-                    )
-                uploaded_to_storage = True
-            except Exception as upload_err:
-                err_str = str(upload_err)
-                if "bucket not found" in err_str.lower():
-                    print("Supabase storage bucket 'resumes' not found. Attempting auto-creation...")
-                    try:
-                        client.storage.create_bucket("resumes", options={"public": True})
-                        print("Bucket 'resumes' created successfully. Retrying upload...")
-                        with open(temp_filepath, "rb") as file_data:
-                            client.storage.from_("resumes").upload(
-                                path=safe_filename,
-                                file=file_data,
-                                file_options={"content-type": file.content_type}
-                            )
-                        uploaded_to_storage = True
-                    except Exception as retry_err:
-                        print(f"Auto-creation of bucket or upload retry failed: {retry_err}")
-                        raise HTTPException(
-                            status_code=404,
-                            detail=(
-                                "Supabase storage bucket 'resumes' was not found and could not be created automatically. "
-                                "Please make sure a public bucket named 'resumes' exists in your Supabase project dashboard, "
-                                "or configure your SUPABASE_KEY in backend/.env with service_role permissions."
-                            )
+            # 3. Try Upload to Supabase Storage if configured
+            if settings.SUPABASE_URL and settings.SUPABASE_KEY:
+                try:
+                    client = database.get_supabase_client()
+                    with open(saved_filepath, "rb") as file_data:
+                        client.storage.from_("resumes").upload(
+                            path=safe_filename,
+                            file=file_data,
+                            file_options={"content-type": file.content_type or "application/octet-stream"}
                         )
-                else:
-                    raise upload_err
+                    uploaded_to_storage = True
+                    public_url = client.storage.from_("resumes").get_public_url(safe_filename)
+                except Exception as upload_err:
+                    print(f"Supabase storage upload skipped/failed ({upload_err}). Using local storage URL.")
             
-            # Get the public URL
-            public_url = client.storage.from_("resumes").get_public_url(safe_filename)
-            
-            # 4. Save to database (without summaries initially, in case API fails)
+            # 4. Save to database
             database.add_resume(resume_id, file.filename, public_url, raw_text, sections)
             added_to_db = True
             
@@ -218,8 +193,11 @@ async def upload_resumes(files: List[UploadFile] = File(...)):
                 except Exception as api_err:
                     print(f"LLM Summary generation failed for {file.filename}: {api_err}")
             
-            # 6. Index chunks in pgvector/Supabase
-            rag_service.index_resume(resume_id, file.filename, sections)
+            # 6. Index chunks in vector store
+            try:
+                rag_service.index_resume(resume_id, file.filename, sections)
+            except Exception as idx_err:
+                print(f"Vector indexing skipped/failed for {file.filename}: {idx_err}")
             
             uploaded_resumes.append({
                 "id": resume_id,
@@ -229,13 +207,6 @@ async def upload_resumes(files: List[UploadFile] = File(...)):
             })
             
         except HTTPException as he:
-            # Clean up Supabase Storage if upload happened but later failed
-            if uploaded_to_storage:
-                try:
-                    client.storage.from_("resumes").remove([safe_filename])
-                except Exception:
-                    pass
-            # Clean up Database if record was added but later failed
             if added_to_db:
                 try:
                     database.delete_resume(resume_id)
@@ -244,13 +215,6 @@ async def upload_resumes(files: List[UploadFile] = File(...)):
             print(f"Failed to process upload {file.filename}: {he.detail}")
             failed_resumes.append({"filename": file.filename, "error": he.detail})
         except Exception as e:
-            # Clean up Supabase Storage if upload happened but later failed
-            if uploaded_to_storage:
-                try:
-                    client.storage.from_("resumes").remove([safe_filename])
-                except Exception:
-                    pass
-            # Clean up Database if record was added but later failed
             if added_to_db:
                 try:
                     database.delete_resume(resume_id)
@@ -258,13 +222,7 @@ async def upload_resumes(files: List[UploadFile] = File(...)):
                     pass
             print(f"Failed to process upload {file.filename}: {e}")
             failed_resumes.append({"filename": file.filename, "error": str(e)})
-        finally:
-            # Always clean up temporary local file
-            if os.path.exists(temp_filepath):
-                try:
-                    os.remove(temp_filepath)
-                except Exception:
-                    pass
+
             
     if len(uploaded_resumes) == 0 and len(failed_resumes) > 0:
         first_err_str = failed_resumes[0]["error"]
@@ -400,4 +358,5 @@ def filter_resumes_endpoint(req: FilterRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    module = "backend.main:app" if os.path.exists("backend/main.py") else "main:app"
+    uvicorn.run(module, host="127.0.0.1", port=8000, reload=True)

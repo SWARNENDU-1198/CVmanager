@@ -92,7 +92,7 @@ def extract_text(filepath: str) -> str:
         raw_text = extract_text_from_pdf(filepath)
     elif ext == ".docx":
         raw_text = extract_text_from_docx(filepath)
-    elif ext == ".txt":
+    elif ext in [".txt", ".csv"]:
         raw_text = extract_text_from_txt(filepath)
     elif ext in [".png", ".jpg", ".jpeg"]:
         raw_text = extract_text_from_image(filepath)

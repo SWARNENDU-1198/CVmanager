@@ -37,14 +37,17 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onUploadSuccess }) => {
       const isPdf = ext === '.pdf';
       const isDocx = ext === '.docx';
       const isTxt = ext === '.txt';
+      const isCsv = ext === '.csv';
       const isPng = ext === '.png';
       const isJpg = ext === '.jpg';
       const isJpeg = ext === '.jpeg';
 
-      if (isPdf || isDocx || isTxt || isPng || isJpg || isJpeg ||
+      if (isPdf || isDocx || isTxt || isCsv || isPng || isJpg || isJpeg ||
           file.type === 'application/pdf' || 
           file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
           file.type === 'text/plain' ||
+          file.type === 'text/csv' ||
+          file.type === 'application/csv' ||
           file.type === 'image/png' ||
           file.type === 'image/jpeg') {
         validFiles.push(file);
@@ -56,7 +59,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onUploadSuccess }) => {
     if (invalidNames.length > 0) {
       setUploadStatus({
         type: 'error',
-        message: `Unsupported file type(s): ${invalidNames.join(', ')}. Please upload PDF, DOCX, TXT, PNG, JPG, or JPEG.`
+        message: `Unsupported file type(s): ${invalidNames.join(', ')}. Please upload PDF, DOCX, TXT, CSV, PNG, JPG, or JPEG.`
       });
     } else {
       setUploadStatus(null);
@@ -125,7 +128,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onUploadSuccess }) => {
           ref={fileInputRef}
           type="file" 
           multiple 
-          accept=".pdf,.docx,.txt,.png,.jpg,.jpeg"
+          accept=".pdf,.docx,.txt,.csv,.png,.jpg,.jpeg"
           onChange={handleFileInput}
           className="hidden" 
         />
@@ -135,11 +138,11 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onUploadSuccess }) => {
         </div>
         
         <h3 className="text-lg font-semibold text-slate-100 mb-2">
-          Drag and drop resumes here
+          Drag and drop resumes or CSVs here
         </h3>
         
         <p className="text-sm text-slate-400 text-center max-w-md">
-          Support for <strong className="text-slate-300">PDF, Word (DOCX), TXT, and Images (PNG, JPG, JPEG)</strong>. Upload up to 10MB per file.
+          Support for <strong className="text-slate-300">PDF, Word (DOCX), TXT, CSV, and Images (PNG, JPG, JPEG)</strong>. Upload up to 10MB per file.
         </p>
       </div>
 
